@@ -23,14 +23,24 @@ import org.camunda.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.camunda.bpm.engine.impl.jobexecutor.JobExecutor;
 import org.camunda.bpm.engine.impl.util.ClockUtil;
 import org.camunda.bpm.engine.runtime.Job;
+import org.camunda.bpm.integrationtest.deployment.callbacks.PurgeDatabaseServlet;
 import org.jboss.shrinkwrap.api.ShrinkWrap;
 import org.jboss.shrinkwrap.api.asset.EmptyAsset;
+import org.jboss.shrinkwrap.api.asset.StringAsset;
+import org.jboss.shrinkwrap.api.spec.JavaArchive;
 import org.jboss.shrinkwrap.api.spec.WebArchive;
+import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLConnection;
 import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 
@@ -52,15 +62,35 @@ public abstract class AbstractFoxPlatformIntegrationTest {
   protected CaseService caseService;
   protected DecisionService decisionService;
 
-  public static WebArchive initWebArchiveDeployment(String name, String processesXmlPath) {
+  private static String warName = "test.war";
+
+  public static WebArchive initWebArchiveDeployment(final String name, String processesXmlPath) {
+    final JavaArchive purgeJar = ShrinkWrap.create(JavaArchive.class, "purge.jar");
+    purgeJar.addClass(PurgeDatabaseServlet.class);
     WebArchive archive = ShrinkWrap.create(WebArchive.class, name)
               .addAsWebInfResource(EmptyAsset.INSTANCE, "beans.xml")
               .addAsLibraries(DeploymentHelper.getEngineCdi())
               .addAsResource(processesXmlPath, "META-INF/processes.xml")
               .addClass(AbstractFoxPlatformIntegrationTest.class)
-              .addClass(TestConstants.class);
+              .addClass(TestConstants.class)
+              .addAsLibraries(purgeJar)
+              .setWebXML(new StringAsset("<web-app version='2.5' xmlns='http://java.sun.com/xml/ns/javaee' " +
+                "xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' " +
+                "xsi:schemaLocation='http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd'>" +
+                "<servlet>" +
+                "<servlet-name>purgeServlet</servlet-name>" +
+                "<servlet-class>" + PurgeDatabaseServlet.class.getName() + "</servlet-class>" +
+                "<load-on-startup>1</load-on-startup>" +
+                "</servlet>" +
+                "<servlet-mapping>" +
+                "<servlet-name>purgeServlet</servlet-name>" +
+                "<url-pattern>/purge</url-pattern>" +
+                "</servlet-mapping>" +
+                "</web-app>"));
 
     TestContainer.addContainerSpecificResources(archive);
+
+    warName = archive.getName();
 
     return archive;
   }
@@ -70,7 +100,7 @@ public abstract class AbstractFoxPlatformIntegrationTest {
   }
 
   public static WebArchive initWebArchiveDeployment() {
-    return initWebArchiveDeployment("test.war");
+    return initWebArchiveDeployment(warName);
   }
 
 
@@ -89,6 +119,36 @@ public abstract class AbstractFoxPlatformIntegrationTest {
     taskService = processEngine.getTaskService();
     caseService = processEngine.getCaseService();
     decisionService = processEngine.getDecisionService();
+  }
+
+  @After
+  public void cleanUp()  {
+    logger.log(Level.INFO, "After test - cleanup");
+    HttpURLConnection httpURLConnection = null;
+    try {
+
+      URL url = new URL("http", "localhost", 38080, "/" + warName.replace(".war", "") + "/purge");
+      URLConnection urlConnection = url.openConnection();
+      httpURLConnection = (HttpURLConnection) urlConnection;
+      httpURLConnection.setRequestMethod("POST");
+      httpURLConnection.setDoOutput(true);
+      httpURLConnection.connect();
+
+      logger.log(Level.INFO, url.toString());
+      int responseCode = httpURLConnection.getResponseCode();
+      logger.log(Level.INFO, "Response code: " + responseCode);
+
+      if (responseCode != 201) {
+        String responseMessage = httpURLConnection.getResponseMessage();
+        Assert.fail(responseMessage);
+      }
+    } catch (IOException ioe) {
+      logger.log(Level.SEVERE, ioe.getMessage(), ioe);
+    } finally {
+      if (httpURLConnection != null) {
+        httpURLConnection.disconnect();
+      }
+    }
   }
 
   public void waitForJobExecutorToProcessAllJobs() {
